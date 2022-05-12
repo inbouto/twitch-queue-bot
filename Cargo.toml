@@ -7,3 +7,5 @@ author = "Inbouto"
 [dependencies]
 config = "0.13.1"
 clap = { version = "3.1.18", features = ["derive"] }
+twitch-irc = "4.0.0"
+tokio = { version = "1.18.2", features = ["full"] }
