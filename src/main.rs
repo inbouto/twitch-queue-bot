@@ -1,10 +1,12 @@
+mod commands;
+mod twitch_handler;
+mod discord_handler;
+
 use config::Config;
 use clap::Parser;
 use config::{File, FileFormat, ConfigError};
-
-use twitch_irc::login::StaticLoginCredentials;
-use twitch_irc::{ClientConfig, SecureTCPTransport, TwitchIRCClient, irc};
-use twitch_irc::message::{IRCMessage, ServerMessage};
+use twitch_handler::{TwitchConnection};
+use commands::Command;
 
 static DEFAULT_CONFIG_FILE: &'static str = "config.toml";
 
@@ -18,8 +20,6 @@ struct Args {
 
 
 
-
-
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
@@ -28,9 +28,11 @@ async fn main() {
         None        => DEFAULT_CONFIG_FILE.to_string(),
     };
     let config = get_config(&config_path).expect(&format!("Could not find config file {}", config_path));
-    println!("{:#?}", config);
-    println!("auto-kick-timer-minutes = {}", config.get::<String>("auto-kick-timer-minutes").unwrap());
-    twitch_connect(&config.get::<String>("twitch-channel-listen").unwrap(), &config.get::<String>("twitch-bot-username").unwrap(), Some(config.get::<String>("twitch-bot-token").unwrap())).await;
+
+    let commands = init_commands();
+
+    let twitch_connection = TwitchConnection::new(&config.get::<String>("twitch-channel-listen").unwrap(), &config.get::<String>("twitch-bot-username").unwrap(), Some(config.get::<String>("twitch-bot-token").unwrap())).await;
+    twitch_messages_handler(twitch_connection, &commands, &config.get::<String>("twitch-command-prefix").unwrap()).await;
 }
 
 fn get_config(config_path: &str) -> Result<Config, ConfigError> {
@@ -41,36 +43,27 @@ fn get_config(config_path: &str) -> Result<Config, ConfigError> {
     Ok(builder.build()?)
 }
 
-
-
-
-async fn twitch_connect(channel: &str, username: &str, token: Option<String>) {
-    // default configuration is to join chat as anonymous.
-    let config = ClientConfig::new_simple(StaticLoginCredentials::new(username.to_string(), token));
-    let (mut incoming_messages, client) =
-        TwitchIRCClient::<SecureTCPTransport, StaticLoginCredentials>::new(config);
-
-    // first thing you should do: start consuming incoming messages,
-    // otherwise they will back up.
-    let join_handle = tokio::spawn(async move {
-        while let Some(message) = incoming_messages.recv().await {
-            match message {
-                ServerMessage::Privmsg(priv_msg) => println!("@{} => {} : {} ", priv_msg.channel_login, priv_msg.sender.name, priv_msg.message_text),
-                _ => (),
-            }
-        }
-    });
-
-    // join a channel
-    // This function only returns an error if the passed channel login name is malformed,
-    // so in this simple case where the channel name is hardcoded we can ignore the potential
-    // error with `unwrap`.
-    client.join(channel.to_owned()).unwrap();
-
-    client.say(channel.to_string(), "Hello World!".to_string()).await.unwrap();
-
-    // keep the tokio executor alive.
-    // If you return instead of waiting the background task will exit.
-    join_handle.await.unwrap();
+fn init_commands() -> Vec<Command> {
+    let mut commands = Vec::<Command>::new();
+    commands.push(Command::new(&"ping", vec![], Some(String::from("Ping, and I'll Pong!")), commands::ping));
+    commands
 }
 
+async fn twitch_messages_handler(mut twitch_connection: TwitchConnection , commands: &Vec<Command>, command_prefix: &str) {
+    loop {
+        match twitch_connection.read_message().await {
+            Some(message) => {
+                let mut words = (&message[..]).split_whitespace();
+                let first_word = words.next().unwrap();
+                if !(&first_word[..command_prefix.len()] == command_prefix){
+                    return;
+                }
+                match commands.iter().find( | &command | command.clone().get_keyword() == first_word[command_prefix.len()..] ) {
+                    Some(command) => twitch_connection.send_message(first_word[command_prefix.len()..].to_string()).await.unwrap_or(()),
+                    _ => (),
+                };
+            },
+            _   => (),
+        };
+    }
+}
